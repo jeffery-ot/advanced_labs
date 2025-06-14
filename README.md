@@ -34,11 +34,11 @@ This project implements a complete music streaming analytics pipeline that proce
 
 Before you begin, ensure you have:
 
-- ✅ **AWS Account** with free tier access
-- ✅ **AWS CLI** configured with Access Key ID and Secret Access Key
-- ✅ Basic knowledge of **AWS Services** (S3, IAM, VPC)
-- ✅ **SQL** understanding for data querying
-- ✅ Multiple AWS CLI profiles (optional, for different IAM users)
+-  **AWS Account** with free tier access
+-  **AWS CLI** configured with Access Key ID and Secret Access Key
+-  Basic knowledge of **AWS Services** (S3, IAM, VPC)
+-  **SQL** understanding for data querying
+-  Multiple AWS CLI profiles (optional, for different IAM users)
 
 ## Architecture
 
@@ -282,11 +282,11 @@ ORDER BY unique_listeners DESC;
 ## Security & Best Practices
 
 ### Security Measures
-- ✅ **IAM Policies** for access control
-- ✅ **VPC-based** Redshift access
-- ✅ **Encryption at rest** using KMS/HSM
-- ✅ **Audit logging** enabled
-- ✅ **VPC endpoints** for private communication
+-  **IAM Policies** for access control
+-  **VPC-based** Redshift access
+-  **Encryption at rest** using KMS/HSM
+-  **Audit logging** enabled
+-  **VPC endpoints** for private communication
 
 ### Best Practices
 - Use **least privilege** IAM policies
