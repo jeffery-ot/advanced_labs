@@ -1,2 +1,9 @@
-
-apache-airflow-providers-amazon==8.28.0
+# Core Spark + AWS + MySQL requirements
+pyspark                       # match Glue version (e.g., 3.3.0 for Glue 4.0)
+boto3                         # AWS SDK for Python
+pymysql                       # MySQL driver (for SQLAlchemy or pandas)
+mysql-connector-python        # Alternative MySQL connector (JDBC support)
+sqlalchemy                    # Optional: ORM / SQL abstraction
+pandas                        # For local testing & quick data checks
+pyarrow                       # For Parquet format support
+awscli
