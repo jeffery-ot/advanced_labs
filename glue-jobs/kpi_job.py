@@ -1,125 +1,99 @@
-from pyspark.sql import SparkSession, functions as F
-from pyspark.sql.window import Window
-
-spark = SparkSession.builder.appName("BusinessMetrics").getOrCreate()
-
-# Load curated parquet with casts
-apartments = spark.read.parquet("s3a://lab2-redshiftdata/curated/apartments") \
-    .withColumn("id", F.col("id").cast("string")) \
-    .withColumn("price", F.col("price").cast("double")) \
-    .withColumn("is_active", F.col("is_active").cast("boolean")) \
-    .withColumn("listing_created_on", F.to_date(F.col("listing_created_on")))
-
-apartment_attributes = spark.read.parquet("s3a://lab2-redshiftdata/curated/apartment_attributes") \
-    .withColumn("id", F.col("id").cast("string")) \
-    .withColumn("bathrooms", F.col("bathrooms").cast("int")) \
-    .withColumn("bedrooms", F.col("bedrooms").cast("int")) \
-    .withColumn("pets_allowed", F.col("pets_allowed").cast("boolean")) \
-    .withColumn("price_display", F.col("price_display").cast("double")) \
-    .withColumn("square_feet", F.col("square_feet").cast("double")) \
-    .withColumn("latitude", F.col("latitude").cast("double")) \
-    .withColumn("longitude", F.col("longitude").cast("double")) \
-    .withColumnRenamed("cityname", "cityname")
-
-bookings = spark.read.parquet("s3a://lab2-redshiftdata/curated/bookings") \
-    .withColumn("booking_id", F.col("booking_id").cast("string")) \
-    .withColumn("user_id", F.col("user_id").cast("string")) \
-    .withColumn("apartment_id", F.col("apartment_id").cast("string")) \
-    .withColumn("booking_date", F.to_date(F.col("booking_date"))) \
-    .withColumn("checkin_date", F.to_date(F.col("checkin_date"))) \
-    .withColumn("checkout_date", F.to_date(F.col("checkout_date"))) \
-    .withColumn("total_price", F.col("total_price").cast("double")) \
-    .withColumn("booking_status", F.col("booking_status").cast("string"))
-
-user_viewing = spark.read.parquet("s3a://lab2-redshiftdata/curated/user_viewing") \
-    .withColumn("user_id", F.col("user_id").cast("string")) \
-    .withColumn("apartment_id", F.col("apartment_id").cast("string")) \
-    .withColumn("viewed_at", F.to_timestamp(F.col("viewed_at"))) \
-    .withColumn("is_wishlisted", F.col("is_wishlisted").cast("boolean"))
+import os
+import logging
+import traceback
+from pyspark.sql import SparkSession, functions as F, Window
 
 
-# Filter active apartments and confirmed bookings
-active_apartments = apartments.filter(F.col("is_active") == True)
-confirmed_bookings = bookings.filter(F.col("booking_status") == "confirmed")
+# Ensure log directory exists
+os.makedirs("/opt/spark/log_data", exist_ok=True)
 
+logging.basicConfig(
+    filename='log_data/presentation_export.log',
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s:%(message)s'
+)
 
-# 1a) Average Listing Price per week
-avg_price_weekly = confirmed_bookings \
-    .join(active_apartments, confirmed_bookings.apartment_id == active_apartments.id) \
-    .withColumn("week", F.weekofyear("booking_date")) \
-    .groupBy("week") \
-    .agg(F.avg("total_price").alias("avg_listing_price"))
+spark = SparkSession.builder.appName("CuratedToPresentationMetrics").getOrCreate()
 
-avg_price_weekly.write.mode("overwrite").parquet("s3a://lab2-redshiftdata/presentation/avg_listing_price")
+curated_base = "s3a://lab2-redshiftdata/curated/"
+presentation_base = "s3a://lab2-redshiftdata/presentation/"
 
+try:
+    apartments = spark.read.parquet(f"{curated_base}apartments")
+    attributes = spark.read.parquet(f"{curated_base}apartment_attributes")
+    bookings = spark.read.parquet(f"{curated_base}bookings")
+    user_viewing = spark.read.parquet(f"{curated_base}user_viewing")
 
-# 1b) Occupancy Rate per month
-booked_nights = confirmed_bookings \
-    .withColumn("nights", F.datediff("checkout_date", "checkin_date")) \
-    .groupBy(F.year("booking_date").alias("year"), F.month("booking_date").alias("month"), "apartment_id") \
-    .agg(F.sum("nights").alias("booked_nights"))
+    # 1. Average Listing Price
+    avg_price_weekly = apartments.filter("is_active = true") \
+        .withColumn("week", F.weekofyear("listing_created_on")) \
+        .withColumn("year", F.year("listing_created_on")) \
+        .groupBy("year", "week").agg(F.avg("price").alias("avg_listing_price"))
+    avg_price_weekly.write.mode("overwrite").parquet(f"{presentation_base}avg_listing_price")
 
-days_in_month = booked_nights.select("year", "month").distinct() \
-    .withColumn("days_in_month", F.dayofmonth(F.last_day(F.concat_ws("-", "year", "month", F.lit("01")))))
+    # 2. Occupancy Rate
+    bwm = bookings.withColumn("month", F.month("checkin_date")).withColumn("year", F.year("checkin_date"))
+    nights_booked = bwm.withColumn("nights_booked", F.datediff("checkout_date", "checkin_date"))
+    occupancy = nights_booked.groupBy("year", "month") \
+        .agg(
+            F.sum("nights_booked").alias("total_nights_booked"),
+            F.countDistinct("apartment_id").alias("unique_listings")
+        ) \
+        .withColumn("estimated_available_nights", F.col("unique_listings") * 30) \
+        .withColumn("occupancy_rate", F.col("total_nights_booked") / F.col("estimated_available_nights"))
+    occupancy.write.mode("overwrite").parquet(f"{presentation_base}occupancy_rate")
 
-occupancy = booked_nights.join(days_in_month, ["year", "month"]) \
-    .withColumn("occupancy_rate", F.col("booked_nights") / F.col("days_in_month")) \
-    .select("year", "month", "apartment_id", "occupancy_rate")
+    # 3. Most Popular Locations
+    popular_locations = bookings.join(attributes, bookings.apartment_id == attributes.id, "left") \
+        .withColumn("week", F.weekofyear("booking_date")) \
+        .withColumn("year", F.year("booking_date")) \
+        .groupBy("year", "week", "cityname") \
+        .agg(F.count("*").alias("bookings")) \
+        .orderBy("year", "week", F.desc("bookings"))
+    popular_locations.write.mode("overwrite").parquet(f"{presentation_base}popular_locations")
 
-occupancy.write.mode("overwrite").parquet("s3a://lab2-redshiftdata/presentation/occupancy_rate")
+    # 4. Weekly Revenue
+    weekly_revenue = bookings.filter("booking_status = 'confirmed'") \
+        .withColumn("week", F.weekofyear("booking_date")) \
+        .withColumn("year", F.year("booking_date")) \
+        .groupBy("year", "week", "apartment_id") \
+        .agg(F.sum("total_price").alias("weekly_revenue")) \
+        .orderBy(F.desc("weekly_revenue"))
+    weekly_revenue.write.mode("overwrite").parquet(f"{presentation_base}top_performing_listings")
 
+    # 5. Bookings per User
+    bookings_per_user = bookings.withColumn("week", F.weekofyear("booking_date")) \
+        .withColumn("year", F.year("booking_date")) \
+        .groupBy("year", "week", "user_id") \
+        .agg(F.count("*").alias("total_bookings"))
+    bookings_per_user.write.mode("overwrite").parquet(f"{presentation_base}bookings_per_user")
 
-# 1c) Most Popular Locations per week
-popular_locations = confirmed_bookings \
-    .join(apartment_attributes, confirmed_bookings.apartment_id == apartment_attributes.id) \
-    .withColumn("week", F.weekofyear("booking_date")) \
-    .groupBy("week", "cityname") \
-    .count() \
-    .orderBy(F.desc("count"))
+    # 6. Avg Booking Duration
+    avg_duration = bookings.withColumn("week", F.weekofyear("booking_date")) \
+        .withColumn("year", F.year("booking_date")) \
+        .withColumn("duration", F.datediff("checkout_date", "checkin_date")) \
+        .groupBy("year", "week") \
+        .agg(F.avg("duration").alias("avg_booking_duration"))
+    avg_duration.write.mode("overwrite").parquet(f"{presentation_base}avg_booking_duration")
 
-popular_locations.write.mode("overwrite").parquet("s3a://lab2-redshiftdata/presentation/popular_locations")
+    # 7. Repeat Customer Rate
+    repeat_customers = bookings.select("user_id", "booking_date").distinct()
+    window_spec = Window.partitionBy("user_id").orderBy("booking_date")
+    prev_booking = repeat_customers.withColumn("prev_date", F.lag("booking_date").over(window_spec))
+    repeat_within_30_days = prev_booking \
+        .withColumn("days_between", F.datediff("booking_date", "prev_date")) \
+        .filter("days_between IS NOT NULL AND days_between <= 30")
+    repeat_user_ids = repeat_within_30_days.select("user_id").distinct()
+    total_users = bookings.select("user_id").distinct().count()
+    repeaters = repeat_user_ids.count()
+    repeat_customer_rate = spark.createDataFrame(
+        [(repeaters, total_users, repeaters / total_users if total_users > 0 else 0.0)],
+        ["repeaters", "total_users", "repeat_rate"]
+    )
+    repeat_customer_rate.write.mode("overwrite").parquet(f"{presentation_base}repeat_customer_rate")
 
-
-# 1d) Top Performing Listings by revenue per week
-top_listings = confirmed_bookings \
-    .withColumn("week", F.weekofyear("booking_date")) \
-    .groupBy("week", "apartment_id") \
-    .agg(F.sum("total_price").alias("total_revenue")) \
-    .orderBy(F.desc("total_revenue"))
-
-top_listings.write.mode("overwrite").parquet("s3a://lab2-redshiftdata/presentation/top_listings")
-
-
-# 2a) Total Bookings per user per week
-bookings_per_user = confirmed_bookings \
-    .withColumn("week", F.weekofyear("booking_date")) \
-    .groupBy("week", "user_id") \
-    .count() \
-    .withColumnRenamed("count", "total_bookings")
-
-bookings_per_user.write.mode("overwrite").parquet("s3a://lab2-redshiftdata/presentation/bookings_per_user")
-
-
-# 2b) Average Booking Duration (days) per week
-avg_duration = confirmed_bookings \
-    .withColumn("duration", F.datediff("checkout_date", "checkin_date")) \
-    .withColumn("week", F.weekofyear("booking_date")) \
-    .groupBy("week") \
-    .agg(F.avg("duration").alias("avg_booking_duration"))
-
-avg_duration.write.mode("overwrite").parquet("s3a://lab2-redshiftdata/presentation/avg_booking_duration")
-
-
-# 2c) Repeat Customer Rate within rolling 30 days
-window_30d = Window.partitionBy("user_id").orderBy(F.col("booking_date").cast("long")).rangeBetween(-30 * 86400, 0)
-
-repeat_rate = confirmed_bookings \
-    .withColumn("bookings_30d", F.count("booking_date").over(window_30d)) \
-    .withColumn("is_repeat", F.when(F.col("bookings_30d") > 1, 1).otherwise(0)) \
-    .withColumn("week", F.weekofyear("booking_date")) \
-    .groupBy("week") \
-    .agg((F.sum("is_repeat") / F.countDistinct("user_id")).alias("repeat_customer_rate"))
-
-repeat_rate.write.mode("overwrite").parquet("s3a://lab2-redshiftdata/presentation/repeat_customer_rate")
+except Exception as e:
+    logging.error(f" Metric pipeline failed: {e}")
+    logging.error(traceback.format_exc())
 
 spark.stop()

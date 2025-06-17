@@ -1,4 +1,6 @@
 .env
 /conf
 .dockerignore
-
+.vscode
+glue-jobs/data
+.vscode

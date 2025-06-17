@@ -1,0 +1,17 @@
+2025-06-17 14:59:58,349 INFO:Writing /opt/data/apartments.csv to MySQL table 'apartments'
+2025-06-17 15:00:03,626 INFO:Writing /opt/data/apartment_attributes.csv to MySQL table 'apartment_attributes'
+2025-06-17 15:00:07,078 INFO:Writing /opt/data/bookings.csv to MySQL table 'bookings'
+2025-06-17 15:00:13,945 INFO:Writing /opt/data/user_viewing.csv to MySQL table 'user_viewing'
+2025-06-17 15:00:20,886 INFO:Reading MySQL table 'apartments'
+2025-06-17 15:00:20,905 INFO: Previewing data from 'apartments'
+2025-06-17 15:00:21,215 INFO:Writing 'apartments' to s3a://lab2-extractiondata/raw/apartments as Parquet
+2025-06-17 15:00:51,990 INFO:Reading MySQL table 'apartment_attributes'
+2025-06-17 15:00:52,031 INFO: Previewing data from 'apartment_attributes'
+2025-06-17 15:00:52,856 INFO:Writing 'apartment_attributes' to s3a://lab2-extractiondata/raw/apartment_attributes as Parquet
+2025-06-17 15:01:22,718 INFO:Reading MySQL table 'bookings'
+2025-06-17 15:01:22,756 INFO: Previewing data from 'bookings'
+2025-06-17 15:01:23,767 INFO:Writing 'bookings' to s3a://lab2-extractiondata/raw/bookings as Parquet
+2025-06-17 15:01:57,927 INFO:Reading MySQL table 'user_viewing'
+2025-06-17 15:01:57,955 INFO: Previewing data from 'user_viewing'
+2025-06-17 15:01:58,226 INFO:Writing 'user_viewing' to s3a://lab2-extractiondata/raw/user_viewing as Parquet
+2025-06-17 15:02:20,330 INFO:Closing down clientserver connection

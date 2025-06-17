@@ -30,5 +30,8 @@ RUN curl -L -o /opt/bitnami/spark/jars/hadoop-aws-3.3.6.jar https://repo1.maven.
 # Download MySQL JDBC connector
 RUN curl -L -o /opt/bitnami/spark/jars/mysql-connector-java-8.3.0.jar https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.3.0/mysql-connector-j-8.3.0.jar
 
+# Redshift JDBC driver
+RUN curl -L -o /opt/bitnami/spark/jars/redshift-jdbc42-2.1.0.9.jar https://s3.amazonaws.com/redshift-downloads/drivers/jdbc/2.1.0.9/redshift-jdbc42-2.1.0.9.jar
+
 # Switch back to non-root user for runtime if required (commented here since compose handles user mapping)
 # USER 1001
