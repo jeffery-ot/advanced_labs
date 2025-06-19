@@ -4,6 +4,10 @@
 
 This project implements a **batch ETL pipeline** for a rental marketplace platform, leveraging AWS services and Spark to process data from a MySQL source through Amazon S3 into Amazon Redshift, organized into a multi-layer architecture (Raw, Curated, Presentation). The final output is a set of business intelligence metrics for rental performance and user engagement.
 
+## AWS Whiteboard
+
+![alt text](misc/aws-whiteboard.png)
+
 ---
 
 ## Architecture Diagram (Whiteboarding)
