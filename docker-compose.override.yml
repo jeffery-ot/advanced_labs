@@ -1,10 +1,11 @@
+
 services:
   glue_pyspark:
     image: public.ecr.aws/glue/aws-glue-libs:5
     command: ["pyspark"]
     volumes:
-      - ~/.aws:/root/.aws:ro
-      - $WORKSPACE_LOCATION:/home/glue_user/workspace/
+      - "${HOME}/.aws:/root/.aws:ro"
+      - "${WORKSPACE_LOCATION}:/home/glue_user/workspace/"
     environment:
       - AWS_PROFILE=${AWS_PROFILE}
       - DISABLE_SSL=true
