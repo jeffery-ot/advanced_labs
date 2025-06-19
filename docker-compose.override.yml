@@ -1,14 +1,15 @@
-
 services:
   glue_pyspark:
     image: public.ecr.aws/glue/aws-glue-libs:5
     command: ["pyspark"]
     volumes:
-      - "${HOME}/.aws:/root/.aws:ro"
+      - "${HOME}/.aws:/home/glue_user/.aws:ro"
       - "${WORKSPACE_LOCATION}:/home/glue_user/workspace/"
     environment:
-      - AWS_PROFILE=${AWS_PROFILE}
-      - DISABLE_SSL=true
+    - AWS_PROFILE=default
+    - AWS_DEFAULT_REGION=us-east-1  
+    - DISABLE_SSL=true
+
     ports:
       - "4040:4040"
       - "18080:18080"
@@ -17,3 +18,9 @@ services:
     deploy:
       restart_policy:
         condition: on-failure
+    networks:
+      - shared_network
+
+networks:
+  shared_network:
+    driver: bridge
