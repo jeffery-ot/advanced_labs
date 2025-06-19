@@ -1,0 +1,18 @@
+services:
+  glue_pyspark:
+    image: public.ecr.aws/glue/aws-glue-libs:5
+    command: ["pyspark"]
+    volumes:
+      - ~/.aws:/root/.aws:ro
+      - $WORKSPACE_LOCATION:/home/glue_user/workspace/
+    environment:
+      - AWS_PROFILE=${AWS_PROFILE}
+      - DISABLE_SSL=true
+    ports:
+      - "4040:4040"
+      - "18080:18080"
+    tty: true
+    stdin_open: true
+    deploy:
+      restart_policy:
+        condition: on-failure
