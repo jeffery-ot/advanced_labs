@@ -1,7 +1,7 @@
 import sys
 from datetime import datetime
 import boto3
-from pyspark.sql.functions import trim
+from pyspark.sql.functions import trim, col
 from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
@@ -48,9 +48,9 @@ def get_schemas():
             StructField("track_genre", StringType(), True)
         ]),
         "stream": StructType([
-            StructField("user_id", IntegerType(), True),
+            StructField("user_id", StringType(), True),
             StructField("track_id", StringType(), True),
-            StructField("listen_time", TimestampType(), True)
+            StructField("listen_time", StringType(), True)
         ])
     }
 
@@ -113,6 +113,7 @@ def load_dataset(glue_context, name, schema, source):
             .load(source["path"])
     elif source["format"] == "parquet":
         df = reader.format("parquet") \
+            .option("recursiveFileLookup", "true") \
             .schema(schema) \
             .load(source["path"])
     else:
@@ -145,6 +146,23 @@ def validate_and_select(dyf: DynamicFrame, required_columns: list, dataset_name:
         raise ValueError(f"[{dataset_name}] Missing required columns: {', '.join(missing)}")
     print(f"[{dataset_name}] Validation passed.")
     return DynamicFrame.fromDF(df.select(*required_columns), dyf.glue_ctx, dataset_name)
+
+# ----------------------------------------
+# Parquet column casting
+# ----------------------------------------
+
+def cast_stream_columns(glue_context, stream_dyf):
+    df = stream_dyf.toDF()
+
+    # Cast user_id to Integer and listen_time to Timestamp
+    df = (
+        df
+        .withColumn("user_id", col("user_id").cast("int"))
+        .withColumn("listen_time", col("listen_time").cast("timestamp"))
+    )
+
+    return DynamicFrame.fromDF(df, glue_context, "stream")
+
 
 # ----------------------------------------
 # Writer
@@ -197,6 +215,10 @@ def main():
     glue_context, job = init_glue_job()
     all_data = load_all_data(glue_context)
 
+    # # Cast columns in stream data
+    all_data["stream"] = cast_stream_columns(glue_context, all_data["stream"])
+
+    # Validate required columns
     required_cols = get_required_columns()
     validated = {
         name: validate_and_select(dyf, required_cols[name], name)

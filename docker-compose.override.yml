@@ -20,7 +20,6 @@ services:
         condition: on-failure
     networks:
       - shared_network
-      - airflow
 
 networks:
   shared_network:
