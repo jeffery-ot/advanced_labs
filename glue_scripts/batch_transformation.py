@@ -77,7 +77,7 @@ def get_data_sources():
 def get_required_columns():
     return {
         "users": ["user_id", "user_name"],
-        "songs": ["track_id", "track_name", "popularity", "track_genre"],
+        "songs": ["track_id", "track_name", "popularity","duration_ms", "track_genre"],
         "stream": ["user_id", "track_id", "listen_time"]
     }
 
@@ -159,22 +159,21 @@ def cast_stream_columns(glue_context, stream_dyf):
         df
         .withColumn("user_id", col("user_id").cast("int"))
         .withColumn("listen_time", col("listen_time").cast("timestamp"))
+        .filter(col("user_id").isNotNull() & col("track_id").isNotNull())
     )
 
     return DynamicFrame.fromDF(df, glue_context, "stream")
-
 
 # ----------------------------------------
 # Writer
 # ----------------------------------------
 
 def write_to_s3(glue_context, dynamic_frame, target_uri: str):
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    output_path = f"{target_uri.rstrip('/')}/batch_{timestamp}/"
+    output_path = f"{target_uri.rstrip('/')}/latest/"
     glue_context.write_dynamic_frame.from_options(
         frame=dynamic_frame,
         connection_type="s3",
-        connection_options={"path": output_path},
+        connection_options={"path": output_path, "partitionKeys": ["track_genre"]},
         format="parquet"
     )
     print(f"Data written to {output_path}")
@@ -197,6 +196,7 @@ def archive_data(source_uri: str, dest_uri: str):
 
     print(f"Archiving from s3://{src_bucket}/{src_prefix} to s3://{dest_bucket}/{dest_prefix}")
     paginator = s3.get_paginator("list_objects_v2")
+    archived_files = 0
 
     for page in paginator.paginate(Bucket=src_bucket, Prefix=src_prefix):
         for obj in page.get("Contents", []):
@@ -204,8 +204,9 @@ def archive_data(source_uri: str, dest_uri: str):
             dest_key = dest_prefix + src_key[len(src_prefix):]
             s3.copy_object(Bucket=dest_bucket, CopySource={'Bucket': src_bucket, 'Key': src_key}, Key=dest_key)
             s3.delete_object(Bucket=src_bucket, Key=src_key)
+            archived_files += 1
 
-    print("Archive complete.")
+    print(f"Archive complete. Files archived: {archived_files}")
 
 # ----------------------------------------
 # Main Logic
@@ -215,70 +216,49 @@ def main():
     glue_context, job = init_glue_job()
     all_data = load_all_data(glue_context)
 
-    # # Cast columns in stream data
     all_data["stream"] = cast_stream_columns(glue_context, all_data["stream"])
 
-    # Validate required columns
     required_cols = get_required_columns()
     validated = {
         name: validate_and_select(dyf, required_cols[name], name)
         for name, dyf in all_data.items()
     }
 
-    # Convert DynamicFrames to DataFrames
     stream_df = validated["stream"].toDF()
     users_df = validated["users"].toDF()
     songs_df = validated["songs"].toDF()
 
-    # Trim whitespace from string keys just in case
     stream_df = stream_df.withColumn("track_id", trim("track_id"))
     songs_df = songs_df.withColumn("track_id", trim("track_id"))
 
-    # Debug counts before join
-    print(f"Stream records: {stream_df.count()}")
-    print(f"Users records: {users_df.count()}")
-    print(f"Songs records: {songs_df.count()}")
+    print("Sample stream_df:")
+    stream_df.limit(5).show()
 
-    print("Sample user_ids in stream:")
-    stream_df.select("user_id").distinct().show(5)
+    print("Sample songs_df:")
+    songs_df.limit(5).show()
 
-    print("Sample user_ids in users:")
-    users_df.select("user_id").distinct().show(5)
-
-    print("Sample track_ids in stream:")
-    stream_df.select("track_id").distinct().show(5)
-
-    print("Sample track_ids in songs:")
-    songs_df.select("track_id").distinct().show(5)
-
-    # Join datasets
     joined_df = (
         stream_df
         .join(songs_df, on="track_id", how="inner")
         .join(users_df, on="user_id", how="inner")
-        
     )
 
-    print(f"Joined records: {joined_df.count()}")
-    print("Preview of transformed data:")
+    print(f"Joined records sample:")
     joined_df.select(
         "track_id", "user_id", "listen_time", "user_name",
         "track_name", "popularity", "track_genre"
     ).show(10, truncate=False)
 
-    # Write to S3
     final_dyf = DynamicFrame.fromDF(joined_df, glue_context, "final_output")
     write_to_s3(glue_context, final_dyf, "s3://lab3-curated/transformed-data/")
 
-    # Archive stream data
     archive_data("s3://lab3-raw/processed-streams/", "s3://lab3-raw/archives/")
 
     job.commit()
 
-
-# ----------------------------------------
-# Entrypoint
-# ----------------------------------------
-
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"Job failed due to: {str(e)}", file=sys.stderr)
+        raise
