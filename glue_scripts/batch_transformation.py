@@ -168,15 +168,21 @@ def cast_stream_columns(glue_context, stream_dyf):
 # Writer
 # ----------------------------------------
 
+# ----------------------------------------
+# Writer (Updated: Removed Partitioning + Added Snappy Compression)
+# ----------------------------------------
+
 def write_to_s3(glue_context, dynamic_frame, target_uri: str):
     output_path = f"{target_uri.rstrip('/')}/latest/"
     glue_context.write_dynamic_frame.from_options(
         frame=dynamic_frame,
         connection_type="s3",
-        connection_options={"path": output_path, "partitionKeys": ["track_genre"]},
-        format="parquet"
+        connection_options={"path": output_path},
+        format="parquet",
+        format_options={"compression": "snappy"}
     )
-    print(f"Data written to {output_path}")
+    print(f"Data written to {output_path} using Snappy compression")
+
 
 # ----------------------------------------
 # Archiver
@@ -212,17 +218,30 @@ def archive_data(source_uri: str, dest_uri: str):
 # Main Logic
 # ----------------------------------------
 
+import argparse
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--step", choices=["load", "transform"], help="Run specific step")
+    parser.add_argument("--list", action="store_true", help="List all steps")
+    args = parser.parse_args()
+
+    if args.list:
+        print("Available steps: load, transform")
+        sys.exit(0)
+
     glue_context, job = init_glue_job()
     all_data = load_all_data(glue_context)
 
-    all_data["stream"] = cast_stream_columns(glue_context, all_data["stream"])
+    if args.step == "load":
+        print("Loaded datasets.")
+        job.commit()
+        return
 
+    all_data["stream"] = cast_stream_columns(glue_context, all_data["stream"])
     required_cols = get_required_columns()
-    validated = {
-        name: validate_and_select(dyf, required_cols[name], name)
-        for name, dyf in all_data.items()
-    }
+    validated = {name: validate_and_select(dyf, required_cols[name], name)
+                 for name, dyf in all_data.items()}
 
     stream_df = validated["stream"].toDF()
     users_df = validated["users"].toDF()
@@ -231,27 +250,12 @@ def main():
     stream_df = stream_df.withColumn("track_id", trim("track_id"))
     songs_df = songs_df.withColumn("track_id", trim("track_id"))
 
-    print("Sample stream_df:")
-    stream_df.limit(5).show()
-
-    print("Sample songs_df:")
-    songs_df.limit(5).show()
-
     joined_df = (
-        stream_df
-        .join(songs_df, on="track_id", how="inner")
-        .join(users_df, on="user_id", how="inner")
+        stream_df.join(songs_df, "track_id").join(users_df, "user_id")
     )
-
-    print(f"Joined records sample:")
-    joined_df.select(
-        "track_id", "user_id", "listen_time", "user_name",
-        "track_name", "popularity", "track_genre"
-    ).show(10, truncate=False)
 
     final_dyf = DynamicFrame.fromDF(joined_df, glue_context, "final_output")
     write_to_s3(glue_context, final_dyf, "s3://lab3-curated/transformed-data/")
-
     archive_data("s3://lab3-raw/processed-streams/", "s3://lab3-raw/archives/")
 
     job.commit()
@@ -262,3 +266,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Job failed due to: {str(e)}", file=sys.stderr)
         raise
+

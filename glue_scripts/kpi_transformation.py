@@ -4,6 +4,7 @@ from awsglue.context import GlueContext
 from awsglue.job import Job
 from pyspark.context import SparkContext
 from pyspark.sql.functions import col, to_date
+from pyspark.sql.types import StringType, LongType, TimestampType, DateType
 import boto3
 
 # ----------------------------------------
@@ -18,33 +19,105 @@ def init_glue_job(job_name: str = "normalized-genre-data-job"):
     return glue_context, job
 
 # ----------------------------------------
-# Load Transformed Data
+# Load, Cast, and Validate Data
 # ----------------------------------------
 
-def load_transformed_data(glue_context):
-    df = glue_context.spark_session.read.parquet("s3://lab3-curated/transformed-data/latest/")
-    return df.withColumn("listen_date", to_date("listen_time"))
+def load_and_validate_data(glue_context):
+    spark = glue_context.spark_session
+    df_raw = spark.read.parquet("s3://lab3-curated/transformed-data/latest/")
+
+    df_casted = df_raw.selectExpr(
+        "CAST(user_id AS STRING) AS user_id",
+        "CAST(track_name AS STRING) AS track_name",
+        "CAST(track_genre AS STRING) AS track_genre",
+        "CAST(duration_ms AS BIGINT) AS duration_ms",
+        "CAST(listen_time AS TIMESTAMP) AS listen_time"
+    ).withColumn("listen_date", to_date("listen_time"))
+
+    df_casted.createOrReplaceTempView("raw_listens")
+
+    validated_df = spark.sql("""
+        SELECT *
+        FROM raw_listens
+        WHERE 
+            user_id IS NOT NULL AND
+            track_name IS NOT NULL AND
+            track_genre IS NOT NULL AND
+            duration_ms > 0 AND
+            listen_time IS NOT NULL AND
+            listen_date IS NOT NULL
+    """)
+
+    total_rows = df_casted.count()
+    valid_rows = validated_df.count()
+    dropped_rows = total_rows - valid_rows
+
+    print(f" Total rows read: {total_rows}")
+    print(f" Valid rows: {valid_rows}")
+    print(f" Dropped rows due to validation: {dropped_rows}")
+
+    return validated_df, total_rows, valid_rows, dropped_rows
 
 # ----------------------------------------
 # Ensure S3 Bucket Exists
 # ----------------------------------------
 
 def ensure_s3_bucket(bucket_name):
-    s3 = boto3.client('s3')
+    s3 = boto3.client("s3")
     try:
         s3.head_bucket(Bucket=bucket_name)
     except:
         s3.create_bucket(Bucket=bucket_name)
 
 # ----------------------------------------
-# Write Normalized Data to S3
+# Ensure DynamoDB Table Exists
+# ----------------------------------------
+
+def ensure_dynamodb_table(table_name):
+    client = boto3.client("dynamodb")
+    existing_tables = client.list_tables()["TableNames"]
+
+    if table_name not in existing_tables:
+        client.create_table(
+            TableName=table_name,
+            KeySchema=[
+                {"AttributeName": "track_genre", "KeyType": "HASH"},
+                {"AttributeName": "listen_time", "KeyType": "RANGE"},
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "track_genre", "AttributeType": "S"},
+                {"AttributeName": "listen_time", "AttributeType": "S"},
+            ],
+            ProvisionedThroughput={"ReadCapacityUnits": 5, "WriteCapacityUnits": 5}
+        )
+        client.get_waiter("table_exists").wait(TableName=table_name)
+
+# ----------------------------------------
+# Write to DynamoDB
+# ----------------------------------------
+
+def write_to_dynamodb(df, table_name):
+    df_out = df.selectExpr(
+        "CAST(track_genre AS STRING) AS track_genre",
+        "CAST(listen_time AS STRING) AS listen_time",
+        "user_id", "track_name", "duration_ms", "listen_date"
+    )
+
+    df_out.write.format("dynamodb")\
+        .option("tableName", table_name)\
+        .option("writeBatchSize", "25")\
+        .mode("append")\
+        .save()
+
+# ----------------------------------------
+# Write to S3
 # ----------------------------------------
 
 def write_to_s3(df, base_path):
     df.write.partitionBy("listen_date").mode("overwrite").parquet(base_path)
 
 # ----------------------------------------
-# Archive the latest/ data
+# Archive Latest Data
 # ----------------------------------------
 
 def archive_latest_data(bucket, source_prefix, archive_prefix_base):
@@ -58,11 +131,17 @@ def archive_latest_data(bucket, source_prefix, archive_prefix_base):
             source_key = obj["Key"]
             destination_key = source_key.replace(source_prefix, archive_prefix, 1)
 
-            # Copy to archive
             s3.copy_object(Bucket=bucket, CopySource={"Bucket": bucket, "Key": source_key}, Key=destination_key)
-
-            # Delete original
             s3.delete_object(Bucket=bucket, Key=source_key)
+
+# ----------------------------------------
+# Log Validation Metrics to S3
+# ----------------------------------------
+
+def log_metrics_to_s3(bucket, key, total, valid, dropped):
+    s3 = boto3.client("s3")
+    log_content = f"timestamp,total_rows,valid_rows,dropped_rows\n{datetime.utcnow()},{total},{valid},{dropped}"
+    s3.put_object(Bucket=bucket, Key=key, Body=log_content.encode("utf-8"))
 
 # ----------------------------------------
 # Main
@@ -71,27 +150,24 @@ def archive_latest_data(bucket, source_prefix, archive_prefix_base):
 def main():
     glue_context, job = init_glue_job()
 
-    df = load_transformed_data(glue_context)
+    validated_df, total_rows, valid_rows, dropped_rows = load_and_validate_data(glue_context)
 
-    normalized_df = df.select(
-        "user_id",
-        "track_name",
-        "track_genre",
-        "duration_ms",
-        "listen_time",
-        "listen_date"
-    )
+    ensure_s3_bucket("lab3-presentation-data")
+    ensure_dynamodb_table("daily_listens_by_genre")
 
-    ensure_s3_bucket("lab3-presentation")
+    # Write clean data
+    # write_to_dynamodb(validated_df, "daily_listens_by_genre")
+    write_to_s3(validated_df, "s3://lab3-presentation-data/daily_listens/")
 
-    write_to_s3(normalized_df, "s3://lab3-presentation-data/daily_listens/")
-
-    # Archive raw data
+    # Archive latest raw
     archive_latest_data(
         bucket="lab3-curated",
         source_prefix="transformed-data/latest/",
         archive_prefix_base="transformed-data/archive/"
     )
+
+    # Log metrics
+    log_metrics_to_s3("lab3-presentation-data", "logs/validation_metrics.csv", total_rows, valid_rows, dropped_rows)
 
     job.commit()
 
