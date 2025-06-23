@@ -4,6 +4,7 @@ from awsglue.context import GlueContext
 from awsglue.job import Job
 from pyspark.context import SparkContext
 from pyspark.sql.functions import col, to_date
+from pyspark.sql.types import StringType, LongType, TimestampType, DateType
 import boto3
 
 # ----------------------------------------
@@ -92,42 +93,21 @@ def ensure_dynamodb_table(table_name):
         client.get_waiter("table_exists").wait(TableName=table_name)
 
 # ----------------------------------------
-# Write to DynamoDB using boto3
+# Write to DynamoDB
 # ----------------------------------------
 
 def write_to_dynamodb(df, table_name):
-    import boto3
-    import pandas as pd
+    df_out = df.selectExpr(
+        "CAST(track_genre AS STRING) AS track_genre",
+        "CAST(listen_time AS STRING) AS listen_time",
+        "user_id", "track_name", "duration_ms", "listen_date"
+    )
 
-    dynamodb = boto3.resource("dynamodb")
-    table = dynamodb.Table(table_name)
-
-    # Convert to Pandas (small data only)
-    records = df.select(
-        "track_genre", "listen_time", "user_id", "track_name", "duration_ms", "listen_date"
-    ).toPandas().to_dict(orient="records")
-
-    with table.batch_writer(overwrite_by_pkeys=["track_genre", "listen_time"]) as batch:
-        for item in records:
-            # Ensure proper types
-            item["track_genre"] = str(item.get("track_genre", ""))
-            item["listen_time"] = item.get("listen_time")
-            if isinstance(item["listen_time"], datetime):
-                item["listen_time"] = item["listen_time"].isoformat()
-            elif item["listen_time"] is not None:
-                item["listen_time"] = str(item["listen_time"])
-            else:
-                continue  # skip item if listen_time is missing
-
-            item["user_id"] = str(item.get("user_id", ""))
-            item["track_name"] = str(item.get("track_name", ""))
-            item["duration_ms"] = int(item.get("duration_ms", 0))
-            listen_date = item.get("listen_date")
-            item["listen_date"] = (
-                listen_date.isoformat() if isinstance(listen_date, datetime) else str(listen_date)
-            )
-
-            batch.put_item(Item=item)
+    df_out.write.format("dynamodb")\
+        .option("tableName", table_name)\
+        .option("writeBatchSize", "25")\
+        .mode("append")\
+        .save()
 
 # ----------------------------------------
 # Write to S3
@@ -175,15 +155,18 @@ def main():
     ensure_s3_bucket("lab3-presentation-data")
     ensure_dynamodb_table("daily_listens_by_genre")
 
-    write_to_dynamodb(validated_df, "daily_listens_by_genre")
+    # Write clean data
+    # write_to_dynamodb(validated_df, "daily_listens_by_genre")
     write_to_s3(validated_df, "s3://lab3-presentation-data/daily_listens/")
 
+    # Archive latest raw
     archive_latest_data(
         bucket="lab3-curated",
         source_prefix="transformed-data/latest/",
         archive_prefix_base="transformed-data/archive/"
     )
 
+    # Log metrics
     log_metrics_to_s3("lab3-presentation-data", "logs/validation_metrics.csv", total_rows, valid_rows, dropped_rows)
 
     job.commit()

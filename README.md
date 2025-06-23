@@ -3,4 +3,4 @@
 
 #### Data Architecture
 
-![alt text](lab3_architecture.drawio.png)
+![alt text](lab3.drawio.png)
