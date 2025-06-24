@@ -1,117 +1,143 @@
 # music_streaming_pipeline.py
-
 import pendulum
 from datetime import timedelta
-
 from airflow import DAG
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator
-
 from airflow.providers.amazon.aws.operators.glue import GlueJobOperator
 from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor
-
 from airflow.utils.task_group import TaskGroup
 
 # === Config ===
 RAW_BUCKET = "lab3-raw"
-STREAM_PREFIX = "processed-streams/"
-GLUE_BATCH_JOB = "batch_transformation"
-GLUE_KPI_JOB = "kpi_transformation"
+CURATED_BUCKET = "lab3-curated"
+PRESENTATION_BUCKET = "lab3-presentation-data"
+PROCESSED_STREAM_PREFIX = "processed-streams/"
+TRANSFORMED_DATA_PREFIX = "transformed-data/latest/"
 
-def archive_stream_data():
+STREAMING_JOB = "streaming_data_ingestion"
+KPI_JOB = "kpi_transformation"
+
+def check_batch_transform_completion():
     import boto3
     s3 = boto3.client("s3")
-    src_prefix = STREAM_PREFIX
-    dst_prefix = f"archives/{STREAM_PREFIX}"
-    resp = s3.list_objects_v2(Bucket=RAW_BUCKET, Prefix=src_prefix)
-    for obj in resp.get("Contents", []):
-        key = obj["Key"]
-        new_key = key.replace(src_prefix, dst_prefix, 1)
-        s3.copy_object(Bucket=RAW_BUCKET,
-                       CopySource={"Bucket": RAW_BUCKET, "Key": key},
-                       Key=new_key)
-        s3.delete_object(Bucket=RAW_BUCKET, Key=key)
+    try:
+        response = s3.list_objects_v2(Bucket=CURATED_BUCKET, Prefix=TRANSFORMED_DATA_PREFIX)
+        if 'Contents' in response and len(response['Contents']) > 0:
+            print("✅ batch_transform completed - found transformed data")
+            return True
+        else:
+            print("❌ batch_transform not completed - no transformed data found")
+            return False
+    except Exception as e:
+        print(f"Error checking batch_transform completion: {e}")
+        return False
 
-def log_kpi_metrics():
-    import boto3, logging, pendulum
+def cleanup_processed_streams():
+    import boto3
     s3 = boto3.client("s3")
-    content = "timestamp,total,valid,dropped\n"
-    content += f"{pendulum.now('UTC')},{1000},{950},{50}\n"
-    s3.put_object(
-        Bucket="lab3-presentation-data",
-        Key="logs/validation_metrics.csv",
-        Body=content.encode()
-    )
-    logging.info("✅ KPI metrics logged to S3")
+    try:
+        response = s3.list_objects_v2(Bucket=RAW_BUCKET, Prefix=PROCESSED_STREAM_PREFIX)
+        remaining_files = len(response.get('Contents', []))
+        print(f"Remaining processed stream files: {remaining_files}")
+        if remaining_files > 0:
+            print("Note: Some processed stream files still exist (may be processing)")
+    except Exception as e:
+        print(f"Error during cleanup check: {e}")
 
+def log_pipeline_completion():
+    import boto3
+    import json
+    from datetime import datetime
+
+    s3 = boto3.client("s3")
+    completion_log = {
+        "pipeline_run_id": f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+        "completion_time": datetime.utcnow().isoformat(),
+        "status": "SUCCESS",
+        "components_completed": [
+            "streaming_data_ingestion",
+            "lambda_trigger",
+            "batch_transform", 
+            "kpi_transformation"
+        ]
+    }
+
+    s3.put_object(
+        Bucket=PRESENTATION_BUCKET,
+        Key=f"logs/pipeline_completion_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json",
+        Body=json.dumps(completion_log, indent=2).encode()
+    )
+    print("✅ Pipeline completion logged")
+
+# === DAG Definition ===
 with DAG(
     dag_id="music_streaming_pipeline",
     start_date=pendulum.now("UTC").subtract(days=1),
-    schedule="@hourly",
+    schedule=None,
     catchup=False,
     max_active_runs=1,
     default_args={
-        "owner": "airflow",
+        "owner": "data_engineering",
         "retries": 2,
         "retry_delay": timedelta(minutes=5),
+        "execution_timeout": timedelta(hours=2),
     },
-    tags=["lab3", "aws", "glue"],
+    tags=["music-streaming", "etl", "glue", "on-demand"],
+    description="On-demand music streaming data pipeline with event-driven batch processing"
 ) as dag:
 
-    start = EmptyOperator(task_id="start")
+    start = EmptyOperator(task_id="pipeline_start")
 
-    wait_for_stream = S3KeySensor(
-        task_id="wait_for_processed_streams",
-        bucket_name=RAW_BUCKET,
-        bucket_key=STREAM_PREFIX + "*",
-        wildcard_match=True,
-        poke_interval=60,
-        timeout=60 * 30,
-        mode="poke",
+    streaming_ingestion = GlueJobOperator(
+        task_id="run_streaming_data_ingestion",
+        job_name=STREAMING_JOB,
+        aws_conn_id="aws_default",
+        region_name="us-east-1",
+        wait_for_completion=True,
     )
 
-    with TaskGroup("batch_processing", tooltip="Batch load & transform") as batch_group:
-        batch_load = GlueJobOperator(
-            task_id="batch_load_users_songs",
-            job_name=GLUE_BATCH_JOB,
-            script_args={"--step": "load"},
-            aws_conn_id="aws_default",
-            region_name="us-east-1",
-            wait_for_completion=True,
+    with TaskGroup("wait_for_batch_processing", tooltip="Wait for Lambda-triggered batch processing") as batch_wait_group:
+        wait_for_transformed_data = S3KeySensor(
+            task_id="wait_for_transformed_data",
+            bucket_name=CURATED_BUCKET,
+            bucket_key=TRANSFORMED_DATA_PREFIX + "*",  # <-- added wildcard here
+            wildcard_match=True,
+            poke_interval=60,
+            timeout=60 * 45,
+            mode="poke",
+            soft_fail=False,
         )
 
-        batch_transform = GlueJobOperator(
-            task_id="batch_transform_and_join",
-            job_name=GLUE_BATCH_JOB,
-            script_args={"--step": "transform"},
-            aws_conn_id="aws_default",
-            region_name="us-east-1",
-            wait_for_completion=True,
+        verify_batch_completion = PythonOperator(
+            task_id="verify_batch_transform_completion",
+            python_callable=check_batch_transform_completion,
         )
 
-        archive_raw = PythonOperator(
-            task_id="archive_processed_streams",
-            python_callable=archive_stream_data,
-        )
+        wait_for_transformed_data >> verify_batch_completion
 
-        batch_load >> batch_transform >> archive_raw
-
-    with TaskGroup("kpi_processing", tooltip="KPI transform & log") as kpi_group:
-        kpi_transform = GlueJobOperator(
+    with TaskGroup("kpi_processing", tooltip="KPI transformation and metrics") as kpi_group:
+        kpi_transformation = GlueJobOperator(
             task_id="run_kpi_transformation",
-            job_name=GLUE_KPI_JOB,
-            aws_conn_id="aws_default",
+            job_name=KPI_JOB,
+            aws_conn_id="aws_default", 
             region_name="us-east-1",
             wait_for_completion=True,
         )
 
-        log_metrics = PythonOperator(
-            task_id="log_kpi_metrics",
-            python_callable=log_kpi_metrics,
+        cleanup_check = PythonOperator(
+            task_id="cleanup_processed_streams",
+            python_callable=cleanup_processed_streams,
         )
 
-        kpi_transform >> log_metrics
+        kpi_transformation >> cleanup_check
 
-    end = EmptyOperator(task_id="end")
+    log_completion = PythonOperator(
+        task_id="log_pipeline_completion",
+        python_callable=log_pipeline_completion,
+    )
 
-    start >> wait_for_stream >> batch_group >> kpi_group >> end
+    end = EmptyOperator(task_id="pipeline_end")
+
+    # Final task flow
+    start >> streaming_ingestion >> batch_wait_group >> kpi_group >> log_completion >> end
