@@ -1,18 +1,15 @@
+
 services:
   glue_pyspark:
     image: public.ecr.aws/glue/aws-glue-libs:5
     command: ["pyspark"]
     volumes:
-      - "${HOME}/.aws:/home/glue_user/.aws:ro"
-      - "${WORKSPACE_LOCATION}:/home/glue_user/workspace/"
+      - "${WORKSPACE_LOCATION}:/home/glue_user/workspace/"           # Mount your project workspace
     environment:
-    - AWS_PROFILE=default
-    - AWS_DEFAULT_REGION=us-east-1  
-    - DISABLE_SSL=true
-
+      - DISABLE_SSL=true
     ports:
-      - "4040:4040"
-      - "18080:18080"
+      - "4040:4040"    # Spark UI
+      - "18080:18080"  # Spark History Server (if needed)
     tty: true
     stdin_open: true
     deploy:
@@ -20,7 +17,6 @@ services:
         condition: on-failure
     networks:
       - shared_network
-
 
 networks:
   shared_network:
