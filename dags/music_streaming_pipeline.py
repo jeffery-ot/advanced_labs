@@ -1,4 +1,3 @@
-# music_streaming_pipeline.py
 import pendulum
 from datetime import timedelta
 from airflow import DAG
@@ -7,6 +6,7 @@ from airflow.operators.python import PythonOperator
 from airflow.providers.amazon.aws.operators.glue import GlueJobOperator
 from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor
 from airflow.utils.task_group import TaskGroup
+from airflow.hooks.base import BaseHook  # <-- added
 
 # === Config ===
 RAW_BUCKET = "lab3-raw"
@@ -18,9 +18,18 @@ TRANSFORMED_DATA_PREFIX = "transformed-data/latest/"
 STREAMING_JOB = "streaming_data_ingestion"
 KPI_JOB = "kpi_transformation"
 
-def check_batch_transform_completion():
+def get_s3_client():
     import boto3
-    s3 = boto3.client("s3")
+    conn = BaseHook.get_connection("aws_default")
+    session = boto3.Session(
+        aws_access_key_id=conn.login,
+        aws_secret_access_key=conn.password,
+        region_name="us-east-1"
+    )
+    return session.client("s3")
+
+def check_batch_transform_completion():
+    s3 = get_s3_client()
     try:
         response = s3.list_objects_v2(Bucket=CURATED_BUCKET, Prefix=TRANSFORMED_DATA_PREFIX)
         if 'Contents' in response and len(response['Contents']) > 0:
@@ -34,8 +43,7 @@ def check_batch_transform_completion():
         return False
 
 def cleanup_processed_streams():
-    import boto3
-    s3 = boto3.client("s3")
+    s3 = get_s3_client()
     try:
         response = s3.list_objects_v2(Bucket=RAW_BUCKET, Prefix=PROCESSED_STREAM_PREFIX)
         remaining_files = len(response.get('Contents', []))
@@ -46,11 +54,10 @@ def cleanup_processed_streams():
         print(f"Error during cleanup check: {e}")
 
 def log_pipeline_completion():
-    import boto3
     import json
     from datetime import datetime
 
-    s3 = boto3.client("s3")
+    s3 = get_s3_client()
     completion_log = {
         "pipeline_run_id": f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
         "completion_time": datetime.utcnow().isoformat(),
@@ -101,7 +108,7 @@ with DAG(
         wait_for_transformed_data = S3KeySensor(
             task_id="wait_for_transformed_data",
             bucket_name=CURATED_BUCKET,
-            bucket_key=TRANSFORMED_DATA_PREFIX + "*",  # <-- added wildcard here
+            bucket_key=TRANSFORMED_DATA_PREFIX + "*",
             wildcard_match=True,
             poke_interval=60,
             timeout=60 * 45,
