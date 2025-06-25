@@ -10,6 +10,8 @@ from pyspark.sql.types import (
     StructType, StructField, IntegerType, StringType, TimestampType,
     BooleanType, DoubleType, DateType
 )
+from helper_function import log_to_s3
+import argparse
 
 # ----------------------------------------
 # Schema Definitions
@@ -77,7 +79,7 @@ def get_data_sources():
 def get_required_columns():
     return {
         "users": ["user_id", "user_name"],
-        "songs": ["track_id", "track_name", "popularity","duration_ms", "track_genre"],
+        "songs": ["track_id", "track_name", "popularity", "duration_ms", "track_genre"],
         "stream": ["user_id", "track_id", "listen_time"]
     }
 
@@ -97,7 +99,7 @@ def init_glue_job(job_name: str = "transformation-job"):
 # ----------------------------------------
 
 def load_dataset(glue_context, name, schema, source):
-    print(f"Reading {name} from {source['path']} ({source['format']})")
+    log_to_s3(f"Reading {name} from {source['path']} ({source['format']})", context="load")
     reader = glue_context.spark_session.read
 
     if source["format"] == "csv":
@@ -121,7 +123,6 @@ def load_dataset(glue_context, name, schema, source):
 
     return DynamicFrame.fromDF(df, glue_context, name)
 
-
 def load_all_data(glue_context):
     schemas = get_schemas()
     sources = get_data_sources()
@@ -129,9 +130,9 @@ def load_all_data(glue_context):
     for name in sources:
         try:
             data[name] = load_dataset(glue_context, name, schemas[name], sources[name])
-            print(f"Loaded: {name}")
+            log_to_s3(f"Loaded dataset: {name}", context="load")
         except Exception as e:
-            print(f"Error loading {name}: {e}")
+            log_to_s3(f"Error loading dataset '{name}': {e}", level="ERROR", context="load")
     return data
 
 # ----------------------------------------
@@ -144,7 +145,7 @@ def validate_and_select(dyf: DynamicFrame, required_columns: list, dataset_name:
     missing = set(required_columns) - actual_columns
     if missing:
         raise ValueError(f"[{dataset_name}] Missing required columns: {', '.join(missing)}")
-    print(f"[{dataset_name}] Validation passed.")
+    log_to_s3(f"[{dataset_name}] Validation passed.", context="validate")
     return DynamicFrame.fromDF(df.select(*required_columns), dyf.glue_ctx, dataset_name)
 
 # ----------------------------------------
@@ -153,23 +154,17 @@ def validate_and_select(dyf: DynamicFrame, required_columns: list, dataset_name:
 
 def cast_stream_columns(glue_context, stream_dyf):
     df = stream_dyf.toDF()
-
-    # Cast user_id to Integer and listen_time to Timestamp
     df = (
         df
         .withColumn("user_id", col("user_id").cast("int"))
         .withColumn("listen_time", col("listen_time").cast("timestamp"))
         .filter(col("user_id").isNotNull() & col("track_id").isNotNull())
     )
-
+    log_to_s3("Casting and cleaning stream data", context="transform")
     return DynamicFrame.fromDF(df, glue_context, "stream")
 
 # ----------------------------------------
 # Writer
-# ----------------------------------------
-
-# ----------------------------------------
-# Writer (Updated: Removed Partitioning + Added Snappy Compression)
 # ----------------------------------------
 
 def write_to_s3(glue_context, dynamic_frame, target_uri: str):
@@ -181,8 +176,7 @@ def write_to_s3(glue_context, dynamic_frame, target_uri: str):
         format="parquet",
         format_options={"compression": "snappy"}
     )
-    print(f"Data written to {output_path} using Snappy compression")
-
+    log_to_s3(f"Data written to {output_path} using Snappy compression", context="write")
 
 # ----------------------------------------
 # Archiver
@@ -200,7 +194,7 @@ def archive_data(source_uri: str, dest_uri: str):
     src_bucket, src_prefix = parse_s3_uri(source_uri)
     dest_bucket, dest_prefix = parse_s3_uri(dest_uri)
 
-    print(f"Archiving from s3://{src_bucket}/{src_prefix} to s3://{dest_bucket}/{dest_prefix}")
+    log_to_s3(f"Archiving from s3://{src_bucket}/{src_prefix} to s3://{dest_bucket}/{dest_prefix}", context="archive")
     paginator = s3.get_paginator("list_objects_v2")
     archived_files = 0
 
@@ -212,13 +206,11 @@ def archive_data(source_uri: str, dest_uri: str):
             s3.delete_object(Bucket=src_bucket, Key=src_key)
             archived_files += 1
 
-    print(f"Archive complete. Files archived: {archived_files}")
+    log_to_s3(f"Archive complete. Files archived: {archived_files}", context="archive")
 
 # ----------------------------------------
 # Main Logic
 # ----------------------------------------
-
-import argparse
 
 def main():
     parser = argparse.ArgumentParser()
@@ -230,11 +222,12 @@ def main():
         print("Available steps: load, transform")
         sys.exit(0)
 
+    log_to_s3("Starting Glue ETL job", context="main")
     glue_context, job = init_glue_job()
     all_data = load_all_data(glue_context)
 
     if args.step == "load":
-        print("Loaded datasets.")
+        log_to_s3("Loaded datasets only (load step completed)", context="main")
         job.commit()
         return
 
@@ -250,6 +243,7 @@ def main():
     stream_df = stream_df.withColumn("track_id", trim("track_id"))
     songs_df = songs_df.withColumn("track_id", trim("track_id"))
 
+    log_to_s3("Joining stream, users, and songs datasets", context="transform")
     joined_df = (
         stream_df.join(songs_df, "track_id").join(users_df, "user_id")
     )
@@ -259,11 +253,11 @@ def main():
     archive_data("s3://lab3-raw/processed-streams/", "s3://lab3-raw/archives/")
 
     job.commit()
+    log_to_s3("Glue ETL job completed successfully", context="main")
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"Job failed due to: {str(e)}", file=sys.stderr)
+        log_to_s3(f"Job failed due to: {str(e)}", level="ERROR", context="main")
         raise
-

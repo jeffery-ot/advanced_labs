@@ -4,52 +4,58 @@ from datetime import datetime
 from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
+import boto3
+import uuid
 
 # Set your S3 bucket paths here
 source_bucket = "s3://lab3-raw/streams/"
 output_bucket = "s3://lab3-raw/processed-streams/"
 
+# Logging config
+s3 = boto3.client('s3')
+LOG_BUCKET_NAME = 'lab4-raw'
+LOG_PREFIX = 'logs/'
+
+def log_to_s3(message: str, level: str = "INFO", context: str = "glue-job"):
+    now = datetime.utcnow()
+    timestamp = now.strftime("%Y-%m-%dT%H-%M-%S")
+    unique_id = str(uuid.uuid4())[:8]
+    filename = f"{LOG_PREFIX}{now.strftime('%Y/%m/%d')}/{context}_{level}_{timestamp}_{unique_id}.log"
+    log_content = f"[{timestamp}] [{level}] [{context}] {message}"
+    s3.put_object(Bucket=LOG_BUCKET_NAME, Key=filename, Body=log_content.encode("utf-8"))
+    print(f"Logged to S3: s3://{LOG_BUCKET_NAME}/{filename}")
+
 
 def init_glue_job():
-    """
-    Initialize Glue job context and Spark session.
-    Returns glue_context and job instance.
-    """
     sc = SparkContext()
     glue_context = GlueContext(sc)
     job = Job(glue_context)
-    job.init("hardcoded-ingestion-job", {})  # Hardcoded job name for local/dev
+    job.init("hardcoded-ingestion-job", {})
+    log_to_s3("Glue job initialized.", context="init")
     return glue_context, job
 
-def discover_csv_files_in_s3(glue_context, s3_uri: str) -> list:
-    """
-    Discover all CSV files in the provided S3 URI using Spark read API.
-    """
-    spark = glue_context.spark_session
 
- 
+def discover_csv_files_in_s3(glue_context, s3_uri: str) -> list:
+    spark = glue_context.spark_session
     try:
         df = spark.read.csv(s3_uri + "*.csv", header=True, inferSchema=True)
         files = df.inputFiles()
+        log_to_s3(f"Discovered {len(files)} CSV files in {s3_uri}.", context="discovery")
         return files
     except Exception as e:
+        log_to_s3(f"Failed to discover CSV files: {e}", level="ERROR", context="discovery")
         raise FileNotFoundError(f"No CSV files found at {s3_uri} or unable to list: {e}")
 
 
-
 def select_random_files(files: list) -> list:
-    """
-    Randomly select a subset of CSV files from the provided list.
-    At least one file will be selected.
-    """
     k = random.randint(1, len(files))
-    return random.sample(files, k)
+    selected = random.sample(files, k)
+    log_to_s3(f"Randomly selected {k} file(s).", context="selection")
+    return selected
 
 
 def read_csv_as_dynamic_frame(glue_context, file_path: str):
-    """
-    Read a single CSV file from S3 as a Glue DynamicFrame.
-    """
+    log_to_s3(f"Reading file {file_path}", context="read")
     return glue_context.create_dynamic_frame.from_options(
         format_options={"withHeader": True, "separator": ","},
         connection_type="s3",
@@ -60,10 +66,6 @@ def read_csv_as_dynamic_frame(glue_context, file_path: str):
 
 
 def write_to_s3(glue_context, dynamic_frame, target_uri: str):
-    """
-    Write the given DynamicFrame to the target S3 location in Parquet format.
-    A timestamped folder will be used to avoid overwriting.
-    """
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     output_path = f"{target_uri.rstrip('/')}/batch_{timestamp}/"
 
@@ -74,7 +76,7 @@ def write_to_s3(glue_context, dynamic_frame, target_uri: str):
         format="parquet"
     )
 
-    print(f"Data written to: {output_path}")
+    log_to_s3(f"Data written to {output_path}", context="write")
 
 
 def main():
@@ -87,20 +89,21 @@ def main():
             raise FileNotFoundError(f"No CSV files found at {source_bucket}")
 
         selected_files = select_random_files(available_files)
-        print(f"Selected files for ingestion: {selected_files}")
+        log_to_s3(f"Selected files for ingestion: {selected_files}", context="selection")
 
         for file_path in selected_files:
-            print(f"Reading file: {file_path}")
             df = read_csv_as_dynamic_frame(glue_context, file_path)
-            
-              # Show a preview of the DynamicFrame as a Spark DataFrame
-            print("Data preview:")
-            df.toDF().show(10, truncate=False)  # Show top 10 rows without truncating columns
+
+            # Show a preview of the DynamicFrame as Spark DataFrame
+            preview = df.toDF().limit(10).collect()
+            log_to_s3(f"Preview of file {file_path}:\n{preview}", context="preview")
 
             write_to_s3(glue_context, df, output_bucket)
 
+        log_to_s3("Glue job completed successfully.", context="job")
+
     except Exception as e:
-        print(f"Error: {str(e)}")
+        log_to_s3(f"Glue job failed: {str(e)}", level="ERROR", context="job")
         job.commit()
         sys.exit(1)
 
